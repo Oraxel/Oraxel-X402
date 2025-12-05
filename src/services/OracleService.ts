@@ -1,10 +1,11 @@
 import { OracleJob } from '../types';
+import { env } from '../utils/env';
 
 export class OracleService {
-  private mode: string;
+  private mode: 'demo' | 'live';
 
   constructor() {
-    this.mode = process.env.ORAXEL_MODE || 'demo';
+    this.mode = env.ORAXEL_MODE;
   }
 
   async executeRandomJob(job: OracleJob): Promise<unknown> {

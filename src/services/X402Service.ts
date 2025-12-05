@@ -1,15 +1,16 @@
 import { PaymentRequest } from '../types';
 import { OracleJob } from '../types';
+import { env } from '../utils/env';
 
 export class X402Service {
   private apiKey: string | undefined;
   private merchantId: string | undefined;
-  private mode: string;
+  private mode: 'demo' | 'live';
 
   constructor() {
-    this.apiKey = process.env.X402_API_KEY;
-    this.merchantId = process.env.X402_MERCHANT_ID;
-    this.mode = process.env.ORAXEL_MODE || 'demo';
+    this.apiKey = env.X402_API_KEY;
+    this.merchantId = env.X402_MERCHANT_ID;
+    this.mode = env.ORAXEL_MODE;
   }
 
   createPaymentRequest(job: OracleJob): PaymentRequest {
