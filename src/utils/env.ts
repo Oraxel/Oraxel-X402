@@ -7,6 +7,9 @@ interface EnvConfig {
   ORAXEL_MODE: 'demo' | 'live';
   X402_API_KEY?: string;
   X402_MERCHANT_ID?: string;
+  FACILITATOR_URL?: string;
+  FACILITATOR_API_KEY?: string;
+  FACILITATOR_NAME?: string;
 }
 
 export const validateEnv = (): EnvConfig => {
@@ -40,8 +43,13 @@ export const validateEnv = (): EnvConfig => {
     ...required,
     X402_API_KEY: process.env.X402_API_KEY,
     X402_MERCHANT_ID: process.env.X402_MERCHANT_ID,
+    FACILITATOR_URL: process.env.FACILITATOR_URL,
+    FACILITATOR_API_KEY: process.env.FACILITATOR_API_KEY,
+    FACILITATOR_NAME: process.env.FACILITATOR_NAME,
   };
 };
 
 export const env = validateEnv();
+
+
 

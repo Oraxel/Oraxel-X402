@@ -23,6 +23,23 @@ export interface PaymentRequest {
   currency: string;
 }
 
+export interface PaymentInstructions {
+  amount: string;
+  currency: string;
+  methods: string[];
+  facilitator?: {
+    url: string;
+    name?: string;
+  };
+}
+
+export interface X402PaymentResponse {
+  payment: PaymentInstructions;
+  jobId: string;
+  message?: string;
+  error?: string;
+}
+
 export interface CreateJobRequest {
   type: JobType;
   parameters: Record<string, unknown>;
@@ -33,5 +50,7 @@ export interface CreateJobResponse {
   status: JobStatus;
   paymentRequest: PaymentRequest;
 }
+
+
 
 

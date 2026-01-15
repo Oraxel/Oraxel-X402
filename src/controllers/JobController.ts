@@ -1,20 +1,24 @@
 import { Request, Response, NextFunction } from 'express';
 import { JobService } from '../services/JobService';
 import { X402Service } from '../services/X402Service';
-import { OracleService } from '../services/OracleService';
+import { QueueService } from '../services/QueueService';
+import { FacilitatorService } from '../services/FacilitatorService';
 import { NotFoundError, BadRequestError } from '../utils/errors';
 import { validateCreateJob, validateJobId } from '../utils/validation';
 import { logger } from '../utils/logger';
+import { cacheService } from '../services/CacheService';
 
 export class JobController {
   private jobService: JobService;
   private x402Service: X402Service;
-  private oracleService: OracleService;
+  private queueService: QueueService;
+  private facilitatorService: FacilitatorService;
 
-  constructor() {
+  constructor(queueService: QueueService) {
     this.jobService = new JobService();
     this.x402Service = new X402Service();
-    this.oracleService = new OracleService();
+    this.queueService = queueService;
+    this.facilitatorService = new FacilitatorService();
   }
 
   createJob = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -39,7 +43,7 @@ export class JobController {
         }
       }
 
-      const job = this.jobService.createJob(type, parameters);
+      const job = await this.jobService.createJob(type, parameters);
       const paymentRequest = this.x402Service.createPaymentRequest(job);
 
       logger.info('Job created', { requestId: req.requestId, jobId: job.id, type });
@@ -57,7 +61,7 @@ export class JobController {
   confirmPayment = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const id = validateJobId(req.params.id);
-      const job = this.jobService.getJob(id);
+      const job = await this.jobService.getJob(id);
 
       if (!job) {
         throw new NotFoundError('Job');
@@ -75,33 +79,18 @@ export class JobController {
       await this.x402Service.simulatePaymentConfirmation(id);
 
       // Update job to payment_confirmed
-      this.jobService.updateJob(id, { status: 'payment_confirmed' });
+      await this.jobService.updateJob(id, { status: 'payment_confirmed' });
 
-      // Immediately start oracle query
-      this.jobService.updateJob(id, { status: 'query_in_progress' });
+      // Queue oracle query for background processing
+      await this.jobService.updateJob(id, { status: 'query_in_progress' });
+      await this.queueService.addJob(job);
 
-      try {
-        const result = await this.oracleService.executeJob(job);
-        this.jobService.updateJob(id, {
-          status: 'completed',
-          result,
-        });
+      // Invalidate cache
+      await cacheService.del(`job:${id}`);
 
-        const updatedJob = this.jobService.getJob(id);
-        logger.info('Job completed', { requestId: req.requestId, jobId: id, type: job.type });
-        res.status(200).json(updatedJob);
-      } catch (oracleError) {
-        this.jobService.updateJob(id, {
-          status: 'failed',
-          result: {
-            error: oracleError instanceof Error ? oracleError.message : 'Unknown error',
-          },
-        });
-
-        const updatedJob = this.jobService.getJob(id);
-        logger.error('Job failed', oracleError, { requestId: req.requestId, jobId: id });
-        res.status(200).json(updatedJob);
-      }
+      const updatedJob = await this.jobService.getJob(id);
+      logger.info('Job queued for processing', { requestId: req.requestId, jobId: id, type: job.type });
+      res.status(200).json(updatedJob);
     } catch (error) {
       next(error);
     }
@@ -110,13 +99,128 @@ export class JobController {
   getJob = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const id = validateJobId(req.params.id);
-      const job = this.jobService.getJob(id);
+      
+      // Check for x402 payment header
+      const paymentHeader = req.headers['x-402-payment'] as string | undefined;
+      
+      const job = await this.jobService.getJob(id);
 
       if (!job) {
         throw new NotFoundError('Job');
       }
 
-      res.status(200).json(job);
+      // x402 Protocol: If job needs payment and no payment header provided, return 402
+      if (job.status === 'pending_payment' && !paymentHeader) {
+        const paymentInstructions = this.facilitatorService.getPaymentInstructions();
+        
+        logger.info('Returning 402 Payment Required', { 
+          requestId: req.requestId, 
+          jobId: id 
+        });
+        
+        return res.status(402).json({
+          payment: paymentInstructions,
+          jobId: id,
+          message: 'Payment required to access this resource',
+        });
+      }
+
+      // x402 Protocol: If payment header provided, verify payment
+      if (paymentHeader && job.status === 'pending_payment') {
+        logger.info('Verifying payment via facilitator', { 
+          requestId: req.requestId, 
+          jobId: id 
+        });
+
+        const verification = await this.facilitatorService.verifyPayment(
+          paymentHeader,
+          id,
+          0.003 // Expected amount in SOL
+        );
+
+        if (!verification.verified) {
+          logger.warn('Payment verification failed', { 
+            requestId: req.requestId, 
+            jobId: id,
+            error: verification.error 
+          });
+
+          const paymentInstructions = this.facilitatorService.getPaymentInstructions();
+          return res.status(402).json({
+            error: verification.error || 'Payment verification failed',
+            payment: paymentInstructions,
+            jobId: id,
+          });
+        }
+
+        // Payment verified - update job and trigger oracle
+        logger.info('Payment verified, processing job', { 
+          requestId: req.requestId, 
+          jobId: id,
+          transactionId: verification.transactionId 
+        });
+
+        await this.jobService.updateJob(id, { 
+          status: 'payment_confirmed' 
+        });
+        await this.jobService.updateJob(id, { 
+          status: 'query_in_progress' 
+        });
+        await this.queueService.addJob(job);
+
+        // Invalidate cache
+        await cacheService.del(`job:${id}`);
+
+        // Return updated job (may be in progress)
+        const updatedJob = await this.jobService.getJob(id);
+        return res.status(200).json(updatedJob);
+      }
+
+      // Job already paid or completed - return normally
+      // Try cache first
+      const cacheKey = `job:${id}`;
+      const cached = await cacheService.get<any>(cacheKey);
+      if (cached) {
+        return res.status(200).json(cached);
+      }
+
+      // Get fresh job data
+      const currentJob = await this.jobService.getJob(id);
+      if (!currentJob) {
+        throw new NotFoundError('Job');
+      }
+
+      // Cache for 1 minute
+      await cacheService.set(cacheKey, currentJob, 60);
+
+      res.status(200).json(currentJob);
+    } catch (error) {
+      next(error);
+    }
+  };
+
+  listJobs = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const limit = parseInt(req.query.limit as string, 10) || 50;
+      const offset = parseInt(req.query.offset as string, 10) || 0;
+      const status = req.query.status as string | undefined;
+      const type = req.query.type as string | undefined;
+
+      const filters: { status?: any; type?: any } = {};
+      if (status) filters.status = status;
+      if (type) filters.type = type;
+
+      const result = await this.jobService.getAllJobs(limit, offset, filters);
+
+      res.status(200).json({
+        jobs: result.jobs,
+        pagination: {
+          limit,
+          offset,
+          total: result.total,
+          hasMore: offset + limit < result.total,
+        },
+      });
     } catch (error) {
       next(error);
     }
