@@ -1,4 +1,4 @@
-# Oraxel Backend
+# Oraxel
 
 Oraxel is an x402-powered oracle and execution layer that enables on-demand oracle queries with payment processing.
 
